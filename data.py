@@ -4,9 +4,14 @@ Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses
 """
 import torch.utils.data as data
 import os.path
+import cv2
+import random
 
 def default_loader(path):
     return Image.open(path).convert('RGB')
+
+def cv2_loader(path):
+    return cv2.imread(path)
 
 
 def default_flist_reader(flist):
@@ -76,6 +81,11 @@ from PIL import Image
 import os
 import os.path
 
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+Image.MAX_IMAGE_PIXELS = None # for my hist images
+
 IMG_EXTENSIONS = [
     '.jpg', '.JPG', '.jpeg', '.JPEG',
     '.png', '.PNG', '.ppm', '.PPM', '.bmp', '.BMP',
@@ -99,31 +109,59 @@ def make_dataset(dir):
     return images
 
 
-class ImageFolder(data.Dataset):
+def getFiles(dirName:str) -> list:
+    '''
+    Function to get a list of files from a directory and all subdirectories
 
+    ### Example:
+    ```
+    dirName = '/Users/krunal/desktop/code/pyt'
+    listOfFiles = getFiles(dirName)
+    ```
+    '''
+    listOfFile = os.listdir(dirName)
+    completeFileList = list()
+    for file in listOfFile:
+        completePath = os.path.join(dirName, file)
+        if os.path.isdir(completePath):
+            completeFileList = completeFileList + getFiles(completePath)
+        else:
+            completeFileList.append(completePath)
+
+    return completeFileList
+
+
+class ImageFolder(data.Dataset):
+    '''
+    TODO: implement return_paths=True
+    '''
     def __init__(self, root, transform=None, return_paths=False,
                  loader=default_loader):
-        imgs = sorted(make_dataset(root))
-        if len(imgs) == 0:
+        self.transform = transform
+        self.files = getFiles(root)
+        
+        if len(self.files) == 0:
             raise(RuntimeError("Found 0 images in: " + root + "\n"
                                "Supported image extensions are: " +
                                ",".join(IMG_EXTENSIONS)))
 
-        self.root = root
-        self.imgs = imgs
-        self.transform = transform
-        self.return_paths = return_paths
-        self.loader = loader
-
     def __getitem__(self, index):
-        path = self.imgs[index]
-        img = self.loader(path)
+        img_A_path = self.files[index % len(self.files)]
+        img_A = default_loader(img_A_path)
+
+        folder_B, file_A = os.path.split(img_A_path)
+        files_B = getFiles(folder_B)
+        files_B.remove(img_A_path)
+        index_B = random.randint(0, len(files_B)-1)
+        img_B = files_B[index_B]
+        
+        img_B = default_loader(img_B)
+        
         if self.transform is not None:
-            img = self.transform(img)
-        if self.return_paths:
-            return img, path
-        else:
-            return img
+            img_A = self.transform(img_A)
+            img_B = self.transform(img_B)
+
+        return img_A, img_B
 
     def __len__(self):
-        return len(self.imgs)
+        return len(self.files)

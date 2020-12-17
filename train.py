@@ -17,12 +17,39 @@ import sys
 import tensorboardX
 import shutil
 
+import matplotlib.pyplot as plt
+import torchvision.utils as vutils
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=str, default='configs/edges2handbags_folder.yaml', help='Path to the config file.')
 parser.add_argument('--output_path', type=str, default='.', help="outputs path")
 parser.add_argument("--resume", action="store_true")
 parser.add_argument('--trainer', type=str, default='MUNIT', help="MUNIT|UNIT")
 opts = parser.parse_args()
+
+#######################################
+import wandb
+
+
+def log_loss(iterations, trainer):
+    members = [attr for attr in dir(trainer) \
+               if not callable(getattr(trainer, attr)) and not attr.startswith("__") and ('loss' in attr or 'grad' in attr or 'nwd' in attr)]
+    for m in members:
+        wandb.log({m:getattr(trainer, m)})
+        
+def _gen_imgs(image_outputs, display_image_num, file_name):
+    image_outputs = [images.expand(-1, 3, -1, -1) for images in image_outputs] # expand gray-scale images to 3 channels
+    image_tensor = torch.cat([images[:display_image_num] for images in image_outputs], 0)
+    image_unflat = image_tensor.detach().cpu()
+    image_grid = vutils.make_grid(image_unflat.data, nrow=display_image_num, padding=0, normalize=True)
+    plt.imshow(image_grid.permute(1, 2, 0).squeeze())
+    wandb.log({file_name: plt})
+        
+def log_imgs(image_outputs, display_image_num, image_directory, postfix):
+    n = len(image_outputs)
+    _gen_imgs(image_outputs[0:n//2], display_image_num, 'gen_a2b_%s' % (postfix))
+    _gen_imgs(image_outputs[n//2:n], display_image_num, 'gen_b2a_%s' % (postfix))
+########################################
 
 cudnn.benchmark = True
 
@@ -32,6 +59,10 @@ max_iter = config['max_iter']
 display_size = config['display_size']
 config['vgg_model_path'] = opts.output_path
 
+#################################################
+wandb.init(project="histology-style-transfer", entity="jarartur", config=config)
+#################################################
+
 # Setup model and data loader
 if opts.trainer == 'MUNIT':
     trainer = MUNIT_Trainer(config)
@@ -40,11 +71,15 @@ elif opts.trainer == 'UNIT':
 else:
     sys.exit("Only support MUNIT|UNIT")
 trainer.cuda()
-train_loader_a, train_loader_b, test_loader_a, test_loader_b = get_all_data_loaders(config)
-train_display_images_a = torch.stack([train_loader_a.dataset[i] for i in range(display_size)]).cuda()
-train_display_images_b = torch.stack([train_loader_b.dataset[i] for i in range(display_size)]).cuda()
-test_display_images_a = torch.stack([test_loader_a.dataset[i] for i in range(display_size)]).cuda()
-test_display_images_b = torch.stack([test_loader_b.dataset[i] for i in range(display_size)]).cuda()
+
+wandb.watch(trainer)
+
+train_loader, test_loader = get_all_data_loaders(config)
+
+train_display_images_a = torch.stack([train_loader.dataset[i][0] for i in range(display_size)]).cuda()
+train_display_images_b = torch.stack([train_loader.dataset[i][1] for i in range(display_size)]).cuda()
+test_display_images_a = torch.stack([test_loader.dataset[i][0] for i in range(display_size)]).cuda()
+test_display_images_b = torch.stack([test_loader.dataset[i][1] for i in range(display_size)]).cuda()
 
 # Setup logger and output folders
 model_name = os.path.splitext(os.path.basename(opts.config))[0]
@@ -56,7 +91,7 @@ shutil.copy(opts.config, os.path.join(output_directory, 'config.yaml')) # copy c
 # Start training
 iterations = trainer.resume(checkpoint_directory, hyperparameters=config) if opts.resume else 0
 while True:
-    for it, (images_a, images_b) in enumerate(zip(train_loader_a, train_loader_b)):
+    for it, (images_a, images_b) in enumerate(train_loader):
         trainer.update_learning_rate()
         images_a, images_b = images_a.cuda().detach(), images_b.cuda().detach()
 
@@ -70,6 +105,8 @@ while True:
         if (iterations + 1) % config['log_iter'] == 0:
             print("Iteration: %08d/%08d" % (iterations + 1, max_iter))
             write_loss(iterations, trainer, train_writer)
+            wandb.log({"Iteration": iterations + 1})
+            log_loss(iterations, trainer)
 
         # Write images
         if (iterations + 1) % config['image_save_iter'] == 0:
@@ -78,6 +115,8 @@ while True:
                 train_image_outputs = trainer.sample(train_display_images_a, train_display_images_b)
             write_2images(test_image_outputs, display_size, image_directory, 'test_%08d' % (iterations + 1))
             write_2images(train_image_outputs, display_size, image_directory, 'train_%08d' % (iterations + 1))
+            log_imgs(test_image_outputs, display_size, image_directory, 'test_%08d' % (iterations + 1))
+            log_imgs(train_image_outputs, display_size, image_directory, 'train_%08d' % (iterations + 1))
             # HTML
             write_html(output_directory + "/index.html", iterations + 1, config['image_save_iter'], 'images')
 
